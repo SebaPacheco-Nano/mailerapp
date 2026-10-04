@@ -1,0 +1,447 @@
+﻿
+===== .vscode\settings.json =====
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+}
+
+===== app\db.py =====
+import mysql.connector
+import click
+from flask import current_app, g # g = variable global que contiene absolutamente todo
+from flask.cli import with_appcontext
+from .schema import instructions
+
+def get_db():
+    if 'db' not in g:
+        g.db = mysql.connector.connect(
+            host=current_app.config['DATABASE_HOST'],
+            user=current_app.config['DATABASE_USER'],
+            password=current_app.config['DATABASE_PASSWORD'],
+            database=current_app.config['DATABASE']
+        )
+        g.c = g.db.cursor(dictionary=True)
+    return g.db, g.c
+
+def close_db(e=None):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    db, c = get_db()
+    for i in instructions:
+        c.execute(i)
+    db.commit()
+
+@click.command('init-db')
+@with_appcontext
+def init_db_command():
+    init_db()
+    click.echo("Base de datos inicializada")
+
+def init_app(app):
+    app.teardown_appcontext(close_db)
+    app.cli.add_command(init_db_command)
+
+===== app\mail.py =====
+from flask import (
+    Blueprint,
+    render_template,
+    request,
+    flash,
+    redirect,
+    url_for,
+    current_app,
+)
+import sib_api_v3_sdk
+
+from app.db import get_db
+
+
+bp = Blueprint('mail', __name__, url_prefix="/")
+
+@bp.route('/', methods=['GET'])
+def index():
+    db, c = get_db()
+
+    c.execute("SELECT * FROM email")
+    mails = c.fetchall()
+    
+    return render_template('mails/index.html', mails=mails)
+
+@bp.route('/create', methods=['GET', 'POST'])
+def create():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        subject = request.form.get('subject')
+        content = request.form.get('content')
+        errors = []
+        if not email:
+            errors.append("El campo 'Correo ElectrÃ³nico' es obligatorio.")
+        if not subject:
+            errors.append("El campo 'Asunto' es obligatorio.")
+        if not content:
+            errors.append("El campo 'Contenido' es obligatorio.")
+
+        if len(errors) == 0:
+            required_config = (
+                current_app.config.get("BREVO_API_KEY"),
+                current_app.config.get("BREVO_SENDER_EMAIL"),
+                current_app.config.get("BREVO_SENDER_NAME"),
+            )
+            if not all(required_config):
+                flash("Falta configurar las credenciales o el remitente de Brevo.")
+            else:
+                try:
+                    send(email, subject, content)
+                except Exception:
+                    current_app.logger.exception("Error al enviar correo con Brevo")
+                    flash("No se pudo enviar el correo. Revisa la configuraciÃ³n de Brevo e intÃ©ntalo de nuevo.")
+                else:
+                    db, c = get_db()
+                    c.execute(
+                        "INSERT INTO email (email, subject, content) VALUES (%s, %s, %s)",
+                        (email, subject, content),
+                    )
+                    db.commit()
+                    flash("Correo enviado correctamente.")
+                    return redirect(url_for('mail.index'))
+        else:
+            for error in errors:
+                flash(error)
+    return render_template('mails/create.html')
+
+@bp.route('/search', methods=['GET'])
+def search():
+    query = request.args.get('q', '').strip()
+    db, c = get_db()
+    
+    if query:
+        # Buscamos coincidencias en el correo, el asunto o el contenido
+        c.execute(
+            "SELECT * FROM email WHERE email LIKE %s OR subject LIKE %s OR content LIKE %s",
+            (f"%{query}%", f"%{query}%", f"%{query}%")
+        )
+    else:
+        c.execute("SELECT * FROM email")
+        
+    mails = c.fetchall()
+    return render_template('mails/_list.html', mails=mails, query=query)
+
+
+def send(to, subject, content):
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key["api-key"] = current_app.config["BREVO_API_KEY"]
+
+    api = sib_api_v3_sdk.TransactionalEmailsApi(
+        sib_api_v3_sdk.ApiClient(configuration)
+    )
+    message = sib_api_v3_sdk.SendSmtpEmail(
+        sender={
+            "name": current_app.config["BREVO_SENDER_NAME"],
+            "email": current_app.config["BREVO_SENDER_EMAIL"],
+        },
+        to=[{"email": to}],
+        subject=subject,
+        text_content=content,
+    )
+    return api.send_transac_email(message)
+
+===== app\schema.py =====
+instructions = [
+    'DROP TABLE IF EXISTS email;',
+    """
+        CREATE TABLE email (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            email TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            content TEXT NOT NULL
+        )
+    """
+]   
+
+===== app\__init__.py =====
+import os
+from flask import Flask
+
+def create_app():
+    app = Flask(__name__, template_folder='../templates')
+    secret_key = os.environ.get("SECRET_KEY")
+    if not secret_key:
+        raise RuntimeError("Falta SECRET_KEY. ConfigÃºrala en .env antes de iniciar Flask.")
+
+    app.config.from_mapping(
+        BREVO_API_KEY=os.environ.get("BREVO_API_KEY"),
+        BREVO_SENDER_EMAIL=os.environ.get("BREVO_SENDER_EMAIL"),
+        BREVO_SENDER_NAME=os.environ.get("BREVO_SENDER_NAME", "MailerApp"),
+        SECRET_KEY=secret_key, 
+        DATABASE_HOST=os.environ.get("FLASK_DATABASE_HOST"),
+        DATABASE_PASSWORD=os.environ.get("FLASK_DATABASE_PASSWORD"),
+        DATABASE_USER=os.environ.get("FLASK_DATABASE_USER"),
+        DATABASE=os.environ.get("FLASK_DATABASE"),
+    )
+    from . import db
+
+    db.init_app(app)
+
+    from . import mail
+    app.register_blueprint(mail.bp)
+    
+
+
+    return app
+
+===== app\static\style.css =====
+body {
+    font-family: "Raleway", sans-serif;
+    font-optical-sizing: auto;
+    font-weight: 400;
+    font-style: normal;
+    background-color: #f1f1f1;
+}
+nav {
+    background-color: #ffffff;
+    font-size: 24px;
+    padding: 30px 30px 30px 30px;
+    box-shadow: 0px 1px 3px rgba(51, 51, 51, 0.2);
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100px;
+    height: 100%;
+}
+.content {
+    margin-left: 180px;
+    margin-top: 35px;
+    margin-right: 20px;
+}
+.top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.top-bar form {
+    flex: 1;
+    margin-right: 20px;
+}
+form input[type="text"]:focus {
+    outline: 2px solid #f59e0b;
+    outline-offset: 0px;
+}
+form input[type="text"] {
+    font-family: "Raleway", sans-serif;
+    font-optical-sizing: auto;
+    width: 100%;
+    padding: 10px 15px;
+    border: 1px solid #ccc;
+    border-radius: 22px; 
+    box-sizing: border-box;
+    box-shadow: 0px 1px 3px rgba(51, 51, 51, 0.2);
+    margin-top: 6px;
+    margin-bottom: 16px;
+    display: block;
+}
+ul {
+    padding-left: 0;
+}
+.mail {
+    background-color: #ffffff;
+    list-style-type: none;
+    padding: 20px 20px;
+    border-radius: 15px;
+    box-shadow: 0px 1px 3px rgba(51, 51, 51, 0.2);
+    margin: 0;
+    margin-bottom: 20px;
+    box-shadow: 0px 1px 3px rgba(51, 51, 51, 0.2);
+}
+.mail-content {
+    margin: 5px 0 0 0;
+    color: #2d2d2d;
+}
+.email {
+    color: #f59e0b;
+}
+hr {
+    border: 0;
+    height: 1px;
+    background: #c3c3c3;
+}
+.btn {
+    background-color: #f59e0b;
+    color: #ffffff;
+    padding: 10px 20px;
+    border-radius: 22px; 
+    text-decoration: none;
+    display: inline-block;
+    transition: background-color 0.4s ease;
+    border: none;
+}
+.btn:hover {
+    background-color: rgb(255, 169, 70);
+}
+.btn:active {
+    background-color: #f59e0b;
+}
+textarea {
+    font-family: "Raleway", sans-serif;
+    font-optical-sizing: auto;
+    width: 100%;
+    padding: 10px 15px;
+    border: 1px solid #ccc;
+    border-radius: 22px; 
+    box-sizing: border-box;
+    box-shadow: 0px 1px 3px rgba(51, 51, 51, 0.2);
+    margin-top: 6px;
+    margin-bottom: 16px;
+    display: block;
+    height: 250px;
+}
+textarea:focus {
+    outline: 2px solid #f59e0b;
+    outline-offset: 0px;
+}
+form label {
+    display: inline-block;
+    margin-bottom: 5px;
+    margin-left: 15px;
+}
+
+===== templates\base.html =====
+<!doctype html>
+<title>{% block title %}{% endblock %} - Mailer</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Raleway&display=swap" rel="stylesheet">
+<nav>
+	Mail<b>er</b>
+</nav>
+<section class="content">
+	<div class="top-bar">
+		<form method="get" onsubmit="return false;">
+			<input id="searchInput" name="search" type="text" placeholder="Quieres buscar algo?" autocomplete="off" />
+		</form>
+		{% block action %}{% endblock %}
+	</div>
+	<header>
+		{% block header %}{% endblock %}
+	</header>
+	{% for message in get_flashed_messages() %}
+		<div class="flash">{{ message }}</div>
+	{% endfor %}
+	
+	<div id="mail-container">
+		{% block content %}{% endblock %}
+	</div>
+</section>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const searchInput = document.getElementById("searchInput");
+    const mailContainer = document.getElementById("mail-container");
+
+    function highlightText(text, query) {
+        if (!query) return text;
+        const regex = new RegExp(`(${query})`, 'gi');
+        return text.replace(regex, '<mark style="background-color: #f59e0b; color: white; padding: 0 2px; border-radius: 3px;">$1</mark>');
+    }
+
+    function processHighlights(query) {
+        if (!query) return;
+        const mailElements = mailContainer.querySelectorAll('.mail');
+        mailElements.forEach(mail => {
+            const emailSpan = mail.querySelector('.email');
+            const subjectP = mail.querySelector('.subject b');
+            const contentP = mail.querySelector('.mail-content');
+
+            if (emailSpan) emailSpan.innerHTML = highlightText(emailSpan.textContent, query);
+            if (subjectP) subjectP.innerHTML = highlightText(subjectP.textContent, query);
+            if (contentP) contentP.innerHTML = highlightText(contentP.textContent, query);
+        });
+    }
+
+    searchInput.addEventListener("input", function() {
+        const query = this.value.trim();
+
+        fetch(`/search?q=${encodeURIComponent(query)}`)
+            .then(response => response.text())
+            .then(html => {
+                mailContainer.innerHTML = html;
+                processHighlights(query);
+            })
+            .catch(error => console.error("Error en la bÃºsqueda:", error));
+    });
+});
+</script>
+
+===== templates\mails\create.html =====
+{% extends 'base.html' %}
+
+{% block action %}
+<a class="btn" href="{{ url_for('mail.index') }}">Volver</a>
+{% endblock %}
+
+{% block header %}
+    <h1>{% block title %}Enviar Correo{% endblock %}</h1>
+{% endblock %}
+
+{% block content %}
+  <form method="post">
+    <div class="form-group">
+        <label for="email">Correo ElectrÃ³nico:</label>
+        <input type="text" id="email" name="email" required>
+    </div>
+    <div class="form-group">
+        <label for="subject">Asunto:</label>
+        <input type="text" id="subject" name="subject" required>
+    </div>
+    <div class="form-group">
+        <label for="content">Contenido:</label>
+        <textarea id="content" name="content" required></textarea>
+    </div>
+     <button type="submit" class="btn">Enviar</button>
+  </form>
+{% endblock %}
+
+===== templates\mails\index.html =====
+{% extends 'base.html' %}
+{% block header %}
+<h1>
+  {% block title %}Correos Enviados{% endblock %}
+</h1>
+{% endblock %}
+
+{% block action %}
+  <a href="{{ url_for('mail.create') }}" class="btn">Nuevo Correo</a>
+{% endblock %}
+
+{% block content %}
+  <ul>
+    {% for mail in mails %}
+      <li class="mail">
+        <div> 
+          <span class="email">{{ mail['email'] }}</span>
+          <hr> 
+          <p class="subject"><b>{{ mail['subject'] }}</b></p> 
+          <p class="mail-content">{{ mail['content'] }}</p>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}
+
+===== templates\mails\_list.html =====
+<ul>
+    {% for mail in mails %}
+      <li class="mail">
+        <div> 
+          <span class="email">{{ mail['email'] }}</span>
+          <hr> 
+          <p class="subject"><b>{{ mail['subject'] }}</b></p> 
+          <p class="mail-content">{{ mail['content'] }}</p>
+        </div>
+      </li>
+    {% else %}
+      <p style="color: #666; text-align: center; margin-top: 20px;">No se encontraron correos.</p>
+    {% endfor %}
+  </ul>
