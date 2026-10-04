@@ -1,0 +1,14 @@
+<ul>
+    {% for mail in mails %}
+      <li class="mail">
+        <div> 
+          <span class="email">{{ mail['email'] }}</span>
+          <hr> 
+          <p class="subject"><b>{{ mail['subject'] }}</b></p> 
+          <p class="mail-content">{{ mail['content'] }}</p>
+        </div>
+      </li>
+    {% else %}
+      <p style="color: #666; text-align: center; margin-top: 20px;">No se encontraron correos.</p>
+    {% endfor %}
+  </ul>

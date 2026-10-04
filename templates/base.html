@@ -1,0 +1,66 @@
+<!doctype html>
+<title>{% block title %}{% endblock %} - Mailer</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Raleway&display=swap" rel="stylesheet">
+<nav>
+	Mail<b>er</b>
+</nav>
+<section class="content">
+	<div class="top-bar">
+		<form method="get" onsubmit="return false;">
+			<input id="searchInput" name="search" type="text" placeholder="Quieres buscar algo?" autocomplete="off" />
+		</form>
+		{% block action %}{% endblock %}
+	</div>
+	<header>
+		{% block header %}{% endblock %}
+	</header>
+	{% for message in get_flashed_messages() %}
+		<div class="flash">{{ message }}</div>
+	{% endfor %}
+	
+	<div id="mail-container">
+		{% block content %}{% endblock %}
+	</div>
+</section>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const searchInput = document.getElementById("searchInput");
+    const mailContainer = document.getElementById("mail-container");
+
+    function highlightText(text, query) {
+        if (!query) return text;
+        const regex = new RegExp(`(${query})`, 'gi');
+        return text.replace(regex, '<mark style="background-color: #f59e0b; color: white; padding: 0 2px; border-radius: 3px;">$1</mark>');
+    }
+
+    function processHighlights(query) {
+        if (!query) return;
+        const mailElements = mailContainer.querySelectorAll('.mail');
+        mailElements.forEach(mail => {
+            const emailSpan = mail.querySelector('.email');
+            const subjectP = mail.querySelector('.subject b');
+            const contentP = mail.querySelector('.mail-content');
+
+            if (emailSpan) emailSpan.innerHTML = highlightText(emailSpan.textContent, query);
+            if (subjectP) subjectP.innerHTML = highlightText(subjectP.textContent, query);
+            if (contentP) contentP.innerHTML = highlightText(contentP.textContent, query);
+        });
+    }
+
+    searchInput.addEventListener("input", function() {
+        const query = this.value.trim();
+
+        fetch(`/search?q=${encodeURIComponent(query)}`)
+            .then(response => response.text())
+            .then(html => {
+                mailContainer.innerHTML = html;
+                processHighlights(query);
+            })
+            .catch(error => console.error("Error en la búsqueda:", error));
+    });
+});
+</script>
